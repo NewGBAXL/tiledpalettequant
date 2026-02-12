@@ -952,69 +952,168 @@ function quantizeTiles(palettes, image, useDither) {
     if (numPalettes * colorsPerPalette <= 256) {
         addBmpColors(reducedPalettes, quantizedImage.paletteData);
     }
-    for (let startY = 0; startY < image.height; startY += tileHeight) {
-        for (let startX = 0; startX < image.width; startX += tileWidth) {
-            const tile = extractTile(image, startX, startY);
-            let palette = reducedPalettes[0];
-            let closestPaletteIndex = 0;
-            if (tile.colors.length > 0) {
-                if (useDither) {
-                    closestPaletteIndex = getClosestPaletteIndexDither(reducedPalettes, tile);
+    // Greedy tiling: prefer larger "big tiles" (sizes 32,16,8) where each
+    // small tile inside the big tile shares the same palette. We try sizes in
+    // descending order and accept a big tile if using one palette for the
+    // whole block does not increase per-pixel error beyond a tolerance
+    // compared to assigning each small tile its individually-best palette.
+    const bigSizes = [32, 16, 8];
+    const tolerance = 0.5; // allow up to 50% worse per-pixel error to prefer bigger tiles
+    for (let startY = 0; startY < image.height; ) {
+        // determine candidate big heights for this Y
+        let chosenBigH = tileHeight;
+        let advanceY = tileHeight;
+        for (let tryH of bigSizes) {
+            if (tryH % tileHeight !== 0)
+                continue;
+            if (startY + tryH > image.height)
+                continue;
+            // accept the largest possible by default (we will refine per X)
+            chosenBigH = tryH;
+            break;
+        }
+        for (let startX = 0; startX < image.width; ) {
+            // for this origin, try big widths and heights combinations, prefer larger
+            let assigned = false;
+            for (let tryW of bigSizes) {
+                for (let tryH of bigSizes) {
+                    if (tryW % tileWidth !== 0 || tryH % tileHeight !== 0)
+                        continue;
+                    const blockW = tryW;
+                    const blockH = tryH;
+                    if (startX + blockW > image.width || startY + blockH > image.height)
+                        continue;
+                    // enumerate small tiles inside block
+                    const smallTiles = [];
+                    for (let by = startY; by < startY + blockH; by += tileHeight) {
+                        for (let bx = startX; bx < startX + blockW; bx += tileWidth) {
+                            const t = extractTile(image, bx, by);
+                            if (t.colors.length > 0) smallTiles.push(t);
+                        }
+                    }
+                    if (smallTiles.length === 0)
+                        continue;
+                    // compute independent best total distance (assign each small tile its best palette)
+                    let independentTotal = 0;
+                    let totalPixels = 0;
+                    for (const st of smallTiles) {
+                        let best = Infinity;
+                        for (const pal of reducedPalettes) {
+                            const d = useDither ? paletteDistanceDither(pal, st) : paletteDistance(pal, st);
+                            if (d < best) best = d;
+                        }
+                        independentTotal += best;
+                        totalPixels += st.pixels.length;
+                    }
+                    // compute best single-palette total distance for the whole block
+                    let bestBlockTotal = Infinity;
+                    let bestPalIndex = 0;
+                    for (let pi = 0; pi < reducedPalettes.length; pi++) {
+                        let sumD = 0;
+                        for (const st of smallTiles) {
+                            sumD += useDither ? paletteDistanceDither(reducedPalettes[pi], st) : paletteDistance(reducedPalettes[pi], st);
+                        }
+                        if (sumD < bestBlockTotal) {
+                            bestBlockTotal = sumD;
+                            bestPalIndex = pi;
+                        }
+                    }
+                    const independentAvg = independentTotal / Math.max(1, totalPixels);
+                    const blockAvg = bestBlockTotal / Math.max(1, totalPixels);
+                    // prefer this block if blockAvg is within tolerance of independentAvg
+                    if (blockAvg <= independentAvg * (1 + tolerance)) {
+                        // assign this palette to all pixels in block
+                        for (let by = startY; by < startY + blockH; by++) {
+                            for (let bx = startX; bx < startX + blockW; bx++) {
+                                const endX = Math.min(bx + 1, image.width);
+                                const endY = Math.min(by + 1, image.height);
+                                const x = bx;
+                                const y = by;
+                                const index = 4 * (x + image.width * y);
+                                const bmpIndex = x + bmpWidth * (image.height - 1 - y);
+                                const color = [image.data[index], image.data[index + 1], image.data[index + 2]];
+                                if ((colorZeroBehaviour === ColorZeroBehaviour.TransparentFromTransparent && image.data[index + 3] < 255) || (colorZeroBehaviour === ColorZeroBehaviour.TransparentFromColor && equalColors(color, transparentColor))) {
+                                    quantizedImage.data[index + 0] = image.data[index + 0];
+                                    quantizedImage.data[index + 1] = image.data[index + 1];
+                                    quantizedImage.data[index + 2] = image.data[index + 2];
+                                    quantizedImage.data[index + 3] = image.data[index + 3];
+                                    quantizedImage.colorIndexes[bmpIndex] = bestPalIndex * colorsPerPalette;
+                                }
+                                else {
+                                    let closestColorIndex = 0;
+                                    if (useDither) {
+                                        [closestColorIndex] = getClosestColorDither(reducedPalettes[bestPalIndex], { color: color, x: x, y: y });
+                                    }
+                                    else {
+                                        [closestColorIndex] = getClosestColor(reducedPalettes[bestPalIndex], color);
+                                    }
+                                    const paletteColor = cloneColor(reducedPalettes[bestPalIndex][closestColorIndex]);
+                                    quantizedImage.data[index + 0] = paletteColor[0];
+                                    quantizedImage.data[index + 1] = paletteColor[1];
+                                    quantizedImage.data[index + 2] = paletteColor[2];
+                                    quantizedImage.data[index + 3] = 255;
+                                    quantizedImage.colorIndexes[bmpIndex] = bestPalIndex * colorsPerPalette + closestColorIndex + adjustedIndex;
+                                }
+                            }
+                        }
+                        startX += blockW;
+                        assigned = true;
+                        break;
+                    }
                 }
-                else {
-                    closestPaletteIndex = getClosestPaletteIndex(reducedPalettes, tile);
-                }
-                palette = reducedPalettes[closestPaletteIndex];
+                if (assigned)
+                    break;
             }
-            const endX = Math.min(startX + tileWidth, image.width);
-            const endY = Math.min(startY + tileHeight, image.height);
-            for (let y = startY; y < endY; y++) {
-                for (let x = startX; x < endX; x++) {
-                    const index = 4 * (x + image.width * y);
-                    const bmpIndex = x + bmpWidth * (image.height - 1 - y);
-                    const color = [
-                        image.data[index],
-                        image.data[index + 1],
-                        image.data[index + 2],
-                    ];
-                    if ((colorZeroBehaviour ===
-                        ColorZeroBehaviour.TransparentFromTransparent &&
-                        image.data[index + 3] < 255) ||
-                        (colorZeroBehaviour ===
-                            ColorZeroBehaviour.TransparentFromColor &&
-                            equalColors(color, transparentColor))) {
-                        quantizedImage.data[index + 0] = image.data[index + 0];
-                        quantizedImage.data[index + 1] = image.data[index + 1];
-                        quantizedImage.data[index + 2] = image.data[index + 2];
-                        quantizedImage.data[index + 3] = image.data[index + 3];
-                        quantizedImage.colorIndexes[bmpIndex] =
-                            closestPaletteIndex * colorsPerPalette;
+            if (!assigned) {
+                // fallback: single small tile assignment
+                const tile = extractTile(image, startX, startY);
+                let palette = reducedPalettes[0];
+                let closestPaletteIndex = 0;
+                if (tile.colors.length > 0) {
+                    if (useDither) {
+                        closestPaletteIndex = getClosestPaletteIndexDither(reducedPalettes, tile);
                     }
                     else {
-                        let closestColorIndex = 0;
-                        if (useDither) {
-                            [closestColorIndex] = getClosestColorDither(palette, {
-                                color: color,
-                                x: x,
-                                y: y,
-                            });
+                        closestPaletteIndex = getClosestPaletteIndex(reducedPalettes, tile);
+                    }
+                    palette = reducedPalettes[closestPaletteIndex];
+                }
+                const endX = Math.min(startX + tileWidth, image.width);
+                const endY = Math.min(startY + tileHeight, image.height);
+                for (let y = startY; y < endY; y++) {
+                    for (let x = startX; x < endX; x++) {
+                        const index = 4 * (x + image.width * y);
+                        const bmpIndex = x + bmpWidth * (image.height - 1 - y);
+                        const color = [image.data[index], image.data[index + 1], image.data[index + 2]];
+                        if ((colorZeroBehaviour === ColorZeroBehaviour.TransparentFromTransparent && image.data[index + 3] < 255) || (colorZeroBehaviour === ColorZeroBehaviour.TransparentFromColor && equalColors(color, transparentColor))) {
+                            quantizedImage.data[index + 0] = image.data[index + 0];
+                            quantizedImage.data[index + 1] = image.data[index + 1];
+                            quantizedImage.data[index + 2] = image.data[index + 2];
+                            quantizedImage.data[index + 3] = image.data[index + 3];
+                            quantizedImage.colorIndexes[bmpIndex] = closestPaletteIndex * colorsPerPalette;
                         }
                         else {
-                            [closestColorIndex] = getClosestColor(palette, color);
+                            let closestColorIndex = 0;
+                            if (useDither) {
+                                [closestColorIndex] = getClosestColorDither(palette, { color: color, x: x, y: y });
+                            }
+                            else {
+                                [closestColorIndex] = getClosestColor(palette, color);
+                            }
+                            const paletteColor = cloneColor(palette[closestColorIndex]);
+                            quantizedImage.data[index + 0] = paletteColor[0];
+                            quantizedImage.data[index + 1] = paletteColor[1];
+                            quantizedImage.data[index + 2] = paletteColor[2];
+                            quantizedImage.data[index + 3] = 255;
+                            quantizedImage.colorIndexes[bmpIndex] = closestPaletteIndex * colorsPerPalette + closestColorIndex + adjustedIndex;
                         }
-                        const paletteColor = cloneColor(palette[closestColorIndex]);
-                        quantizedImage.data[index + 0] = paletteColor[0];
-                        quantizedImage.data[index + 1] = paletteColor[1];
-                        quantizedImage.data[index + 2] = paletteColor[2];
-                        quantizedImage.data[index + 3] = 255;
-                        quantizedImage.colorIndexes[bmpIndex] =
-                            closestPaletteIndex * colorsPerPalette +
-                                closestColorIndex +
-                                adjustedIndex;
                     }
                 }
+                startX += tileWidth;
             }
         }
+        // advance Y by one row of tiles (we used variable block heights per X but at least advance by tileHeight)
+        startY += tileHeight;
     }
     return quantizedImage;
     function addBmpColors(palettes, bmpPalette) {
