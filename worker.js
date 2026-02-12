@@ -1142,8 +1142,6 @@ function quantizeTiles(palettes, image, useDither) {
                     }
                 }
                 // mark this small tile in the tileMap if it had colors
-                const mapX = Math.floor(startX / tileWidth);
-                const mapY = Math.floor(startY / tileHeight);
                 if (tile.colors.length > 0) {
                     tileMap[mapY * tilesX + mapX] = closestPaletteIndex;
                 }
