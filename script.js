@@ -181,28 +181,50 @@ function drawPlacementOverlay() {
                 const idx = ty * placementTilesX + tx;
                 const p = manualPaletteMap[idx];
                 if (p >= 0) {
-                    const hue = (p * 360 / Math.max(1, parseInt(numPalettesInput.value, radix))) % 360;
-                    ctx.fillStyle = `hsla(${hue},70%,50%,0.28)`;
-                    ctx.fillRect(tx * tw, ty * th, tw, th);
+                    const selectedP = parseInt(manualPaletteIndexInput.value, radix) || 0;
+                    if (p === selectedP) {
+                        ctx.fillStyle = 'rgba(30,120,255,0.36)';
+                        ctx.fillRect(tx * tw, ty * th, tw, th);
+                    }
+                    else {
+                        ctx.fillStyle = 'rgba(120,120,120,0.64)';
+                        ctx.fillRect(tx * tw, ty * th, tw, th);
+                        // draw palette index number centered in the tile
+                        const fontSize = Math.max(10, Math.floor(Math.min(tw, th) * 0.6));
+                        ctx.font = `${fontSize}px sans-serif`;
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        const cx = tx * tw + tw / 2;
+                        const cy = ty * th + th / 2;
+                        ctx.lineWidth = Math.max(2, Math.floor(fontSize / 6));
+                        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+                        ctx.fillStyle = 'white';
+                        ctx.strokeText(String(p), cx, cy);
+                        ctx.fillText(String(p), cx, cy);
+                    }
                 }
             }
         }
     }
-    // draw grid
-    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    // draw gridlines between pixels (render crisply between device pixels)
+    ctx.strokeStyle = "rgba(0,0,0,0.45)";
     ctx.lineWidth = 1;
     const tilesX = placementTilesX;
     const tilesY = placementTilesY;
+    // draw vertical tile lines
     for (let x = 0; x <= tilesX; x++) {
+        const gx = x * tw + 0.5; // align a 1px stroke between device pixels
         ctx.beginPath();
-        ctx.moveTo(x * tw + 0.5, 0);
-        ctx.lineTo(x * tw + 0.5, placementCanvas.height);
+        ctx.moveTo(gx, 0);
+        ctx.lineTo(gx, placementCanvas.height);
         ctx.stroke();
     }
+    // draw horizontal tile lines
     for (let y = 0; y <= tilesY; y++) {
+        const gy = y * th + 0.5;
         ctx.beginPath();
-        ctx.moveTo(0, y * th + 0.5);
-        ctx.lineTo(placementCanvas.width, y * th + 0.5);
+        ctx.moveTo(0, gy);
+        ctx.lineTo(placementCanvas.width, gy);
         ctx.stroke();
     }
 }
