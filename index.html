@@ -26,8 +26,16 @@
       <td><input type="number" id="tile_height" min="1" max="32" step="1" value="8"></td>
     </tr>
     <tr>
+      <td>Tile size valid:</td>
+      <td><span id="size_valid">—</span></td>
+    </tr>
+    <tr>
       <td><label for="palette_num">Palettes:</label></td>
       <td><input type="number" id="palette_num" min="1" max="16" step="1" value="8"></td>
+    </tr>
+    <tr>
+      <td><label for="max_hw_tiles">Max hardware tiles (optional):</label></td>
+      <td><input type="number" id="max_hw_tiles" min="0" step="1" value="0"> (0 = no limit)</td>
     </tr>
     <tr>
       <td><label for="manual_palette_toggle">Manual palette placement</label></td>
@@ -48,6 +56,10 @@
     <tr>
       <td><label for="fraction_of_pixels">Fraction of pixels:</label></td>
       <td><input type="number" id="fraction_of_pixels" min="0.01" max="10" step="any" value="0.1"></td>
+    </tr>
+    <tr>
+      <td><label for="aggressiveness">Tile grouping aggressiveness:</label></td>
+      <td><input type="range" id="aggressiveness" min="0" max="100" step="1" value="50"> <span id="aggressiveness_val">50</span></td>
     </tr>
   </table>
   <fieldset>
@@ -147,6 +159,7 @@
     <button type="button" id="quantizeButton">Quantize</button>
     <progress id="progress" max="100" value="0"></progress>
   </div>
+  <div id="stats" style="margin-top:8px;"></div>
   <div id="quantized_images">
   </div>
   <script type="module" src="script.js"></script>

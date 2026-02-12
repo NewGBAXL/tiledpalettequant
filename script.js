@@ -4,9 +4,12 @@ const imageSelector = document.getElementById("image_selector");
 const tileWidthInput = document.getElementById("tile_width");
 const tileHeightInput = document.getElementById("tile_height");
 const numPalettesInput = document.getElementById("palette_num");
+const maxHwTilesInput = document.getElementById("max_hw_tiles");
 const colorsPerPaletteInput = document.getElementById("colors_per_palette");
 const bitsPerChannelInput = document.getElementById("bits_per_channel");
 const fractionOfPixelsInput = document.getElementById("fraction_of_pixels");
+const aggressivenessInput = document.getElementById("aggressiveness");
+const aggressivenessVal = document.getElementById("aggressiveness_val");
 
 // Manual palette placement elements
 const manualPaletteToggle = document.getElementById("manual_palette_toggle");
@@ -139,11 +142,15 @@ let quantizedImageDownload = document.createElement("a");
 let palettesImageDownload = document.createElement("a");
 let quantizedImage = document.createElement("canvas");
 let palettesImage = document.createElement("canvas");
+let tileUsageDownload = document.createElement("a");
+let tileUsageCanvas = document.createElement("canvas");
 let worker = null;
 const quantizeButton = document.getElementById("quantizeButton");
 const quantizedImages = document.getElementById("quantized_images");
 const progress = document.getElementById("progress");
 const radix = 10;
+const sizeValidSpan = document.getElementById('size_valid');
+const statsDiv = document.getElementById('stats');
 
 // Setup manual placement interactions
 function ensureManualMap() {
@@ -263,6 +270,13 @@ placementCanvas.addEventListener("click", (ev) => {
     drawPlacementOverlay();
 });
 
+// update displayed aggressiveness value
+if (aggressivenessInput) {
+    aggressivenessInput.addEventListener('input', () => {
+        aggressivenessVal.textContent = aggressivenessInput.value;
+    });
+}
+
 // react to toggles and inputs
 manualPaletteToggle.addEventListener("change", () => {
     enableManualPlacement(manualPaletteToggle.checked);
@@ -289,6 +303,24 @@ sourceImage.addEventListener("load", () => {
 });
 tileWidthInput.addEventListener("change", () => { if (manualPlacementEnabled) { ensureManualMap(); drawPlacementOverlay(); } });
 tileHeightInput.addEventListener("change", () => { if (manualPlacementEnabled) { ensureManualMap(); positionPlacementCanvas(); drawPlacementOverlay(); } });
+// indicate whether the chosen tile size pair is in the allowed set
+function updateSizeValid() {
+    const allowedSizes = new Set([
+        "8x8","8x16","16x16","8x32","32x32","16x32","64x64","32x64","16x8","32x8","32x16","64x32"
+    ]);
+    const tw = parseInt(tileWidthInput.value, radix);
+    const th = parseInt(tileHeightInput.value, radix);
+    if (allowedSizes.has(`${tw}x${th}`)) {
+        sizeValidSpan.textContent = 'valid';
+        sizeValidSpan.style.color = 'green';
+    } else {
+        sizeValidSpan.textContent = 'invalid';
+        sizeValidSpan.style.color = 'red';
+    }
+}
+tileWidthInput.addEventListener('change', updateSizeValid);
+tileHeightInput.addEventListener('change', updateSizeValid);
+updateSizeValid();
 numPalettesInput.addEventListener("change", () => { if (manualPlacementEnabled) drawPlacementOverlay(); });
 quantizeButton.addEventListener("click", () => {
     sourceImage = document.getElementById("source_img");
@@ -308,14 +340,33 @@ quantizeButton.addEventListener("click", () => {
         palettesImage.style.marginLeft = "8px";
         palettesImageDownload = document.createElement("a");
         palettesImageDownload.appendChild(palettesImage);
+        tileUsageCanvas = document.createElement("canvas");
+        tileUsageCanvas.width = sourceImage.width;
+        tileUsageCanvas.height = sourceImage.height;
+        tileUsageCanvas.style.marginTop = "8px";
+        tileUsageCanvas.style.marginLeft = "8px";
+        tileUsageDownload = document.createElement("a");
+        tileUsageDownload.appendChild(tileUsageCanvas);
         const div = document.createElement("div");
         div.appendChild(quantizedImageDownload);
         div.appendChild(palettesImageDownload);
+        div.appendChild(tileUsageDownload);
         quantizedImages.prepend(div);
     }
     integerInputs.forEach(validateIntegerInput);
     validateFloatInput([fractionOfPixelsInput, 0.1]);
     validateFloatInput([ditherWeightInput, 0.5]);
+    // validate tile size pair is allowed
+    const allowedSizes = new Set([
+        "8x8","8x16","16x16","8x32","32x32","16x32","64x64","32x64","16x8","32x8","32x16","64x32"
+    ]);
+    const tw = parseInt(tileWidthInput.value, radix);
+    const th = parseInt(tileHeightInput.value, radix);
+    if (!allowedSizes.has(`${tw}x${th}`)) {
+        alert(`Tile size ${tw}x${th} is not allowed. Valid sizes are: ${Array.from(allowedSizes).join(", ")}`);
+        inProgress = false;
+        return;
+    }
     const colorZeroBehaviour = selectedValue(indexZeroButtons, indexZeroValues);
     const colorInput = selectedValue(indexZeroButtons, colorValues);
     const colorZeroValue = hexToColor(colorInput.value);
@@ -359,6 +410,73 @@ quantizeButton.addEventListener("click", () => {
             if (imageData.totalPaletteColors > 256) {
                 quantizedImageDownload.href = quantizedImage.toDataURL();
             }
+            // draw tile usage visualization if provided
+            if (imageData.tileMap && tileUsageCanvas) {
+                const map = imageData.tileMap;
+                tileUsageCanvas.width = imageData.width;
+                tileUsageCanvas.height = imageData.height;
+                const tctx = tileUsageCanvas.getContext('2d');
+                tctx.clearRect(0,0,tileUsageCanvas.width,tileUsageCanvas.height);
+                const tw = parseInt(tileWidthInput.value, radix);
+                const th = parseInt(tileHeightInput.value, radix);
+                const tilesX = map.tilesX;
+                const tilesY = map.tilesY;
+                const arr = map.map;
+                // draw each small tile colored by palette index
+                for (let ty = 0; ty < tilesY; ty++) {
+                    for (let tx = 0; tx < tilesX; tx++) {
+                        const idx = ty * tilesX + tx;
+                        const palIndex = arr[idx];
+                        const x = tx * tw;
+                        const y = ty * th;
+                        if (palIndex < 0) {
+                            // transparent / unused: draw faint checkerboard
+                            tctx.fillStyle = 'rgba(0,0,0,0.05)';
+                            tctx.fillRect(x,y,tw,th);
+                        }
+                        else {
+                            const hue = (palIndex * 47) % 360;
+                            tctx.fillStyle = `hsla(${hue},80%,55%,0.9)`;
+                            tctx.fillRect(x,y,tw,th);
+                        }
+                        tctx.strokeStyle = 'rgba(0,0,0,0.12)';
+                        tctx.lineWidth = 1;
+                        tctx.strokeRect(x+0.5,y+0.5,tw-1,th-1);
+                    }
+                }
+                tileUsageDownload.href = tileUsageCanvas.toDataURL();
+                // display stats for this quantized result
+                if (statsDiv) {
+                    statsDiv.innerHTML = '';
+                    const hw = document.createElement('div');
+                    hw.textContent = `Hardware tiles (components): ${imageData.hwTileCount}`;
+                    statsDiv.appendChild(hw);
+                    if (imageData.paletteUsage) {
+                        const paletteRow = document.createElement('div');
+                        paletteRow.style.display = 'flex';
+                        paletteRow.style.gap = '8px';
+                        for (let p = 0; p < imageData.paletteUsage.length; p++) {
+                            const count = imageData.paletteUsage[p];
+                            const sw = document.createElement('div');
+                            sw.style.display = 'flex';
+                            sw.style.alignItems = 'center';
+                            const hue = (p * 47) % 360;
+                            const colorBox = document.createElement('div');
+                            colorBox.style.width = '18px';
+                            colorBox.style.height = '12px';
+                            colorBox.style.background = `hsl(${hue},80%,55%)`;
+                            colorBox.style.border = '1px solid rgba(0,0,0,0.2)';
+                            colorBox.style.marginRight = '6px';
+                            sw.appendChild(colorBox);
+                            const label = document.createElement('span');
+                            label.textContent = String(count);
+                            sw.appendChild(label);
+                            paletteRow.appendChild(sw);
+                        }
+                        statsDiv.appendChild(paletteRow);
+                    }
+                }
+            }
             else {
                 quantizedImageDownload.href = bmpToDataURL(imageData.width, imageData.height, imageData.paletteData, imageData.colorIndexes);
             }
@@ -382,6 +500,11 @@ quantizeButton.addEventListener("click", () => {
             palettesImageDownload.href = palettesImage.toDataURL();
         }
     };
+    // include max hardware tiles if set (>0)
+    const maxHw = parseInt(maxHwTilesInput.value || "0", radix);
+    if (!isNaN(maxHw) && maxHw > 0) {
+        msg.quantizationOptions.maxHardwareTiles = maxHw;
+    }
     const msg = {
         action: Action.StartQuantization,
         imageData: imageDataFrom(sourceImage),
@@ -397,6 +520,7 @@ quantizeButton.addEventListener("click", () => {
             dither: ditherMethod,
             ditherWeight: parseFloat(ditherWeightInput.value),
             ditherPattern: ditherPattern,
+                aggressiveness: parseInt(aggressivenessInput.value, radix),
         },
     };
     // include manual palette map if user enabled manual placement

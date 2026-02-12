@@ -958,7 +958,27 @@ function quantizeTiles(palettes, image, useDither) {
     // whole block does not increase per-pixel error beyond a tolerance
     // compared to assigning each small tile its individually-best palette.
     const bigSizes = [32, 16, 8];
-    const tolerance = 0.5; // allow up to 50% worse per-pixel error to prefer bigger tiles
+    // tolerance controls how much worse (fraction) a single-palette block can be
+    // compared to assigning individually-best palettes. Map aggressiveness (0-100)
+    // from the UI to a tolerance range. 0 -> almost no merging, 100 -> very aggressive.
+    const aggr = (quantizationOptions.aggressiveness !== undefined) ? quantizationOptions.aggressiveness : 50;
+    const tolerance = 0.01 + (aggr / 100.0) * 2.0;
+    // allow up to ~0.01 - 2.01x worse depending on aggressiveness
+    // higher tolerance -> more merging
+
+    const tilesX = Math.ceil(image.width / tileWidth);
+    const tilesY = Math.ceil(image.height / tileHeight);
+    const tileMap = new Int16Array(tilesX * tilesY);
+    for (let i = 0; i < tileMap.length; i++) tileMap[i] = -1;
+    // pre-extract every small tile so later passes can inspect them cheaply
+    const tilesGrid = new Array(tilesX * tilesY);
+    for (let ty = 0; ty < tilesY; ty++) {
+        for (let tx = 0; tx < tilesX; tx++) {
+            const bx = tx * tileWidth;
+            const by = ty * tileHeight;
+            tilesGrid[ty * tilesX + tx] = extractTile(image, bx, by);
+        }
+    }
     for (let startY = 0; startY < image.height; ) {
         // determine candidate big heights for this Y
         let chosenBigH = tileHeight;
@@ -987,8 +1007,10 @@ function quantizeTiles(palettes, image, useDither) {
                     const smallTiles = [];
                     for (let by = startY; by < startY + blockH; by += tileHeight) {
                         for (let bx = startX; bx < startX + blockW; bx += tileWidth) {
-                            const t = extractTile(image, bx, by);
-                            if (t.colors.length > 0) smallTiles.push(t);
+                            const mapX = Math.floor(bx / tileWidth);
+                            const mapY = Math.floor(by / tileHeight);
+                            const t = tilesGrid[mapY * tilesX + mapX];
+                            if (t && t.colors.length > 0) smallTiles.push(t);
                         }
                     }
                     if (smallTiles.length === 0)
@@ -1023,6 +1045,14 @@ function quantizeTiles(palettes, image, useDither) {
                     // prefer this block if blockAvg is within tolerance of independentAvg
                     if (blockAvg <= independentAvg * (1 + tolerance)) {
                         // assign this palette to all pixels in block
+                        // mark small tiles in tileMap
+                        for (let ty = startY; ty < startY + blockH; ty += tileHeight) {
+                            for (let tx = startX; tx < startX + blockW; tx += tileWidth) {
+                                const mapX = Math.floor(tx / tileWidth);
+                                const mapY = Math.floor(ty / tileHeight);
+                                tileMap[mapY * tilesX + mapX] = bestPalIndex;
+                            }
+                        }
                         for (let by = startY; by < startY + blockH; by++) {
                             for (let bx = startX; bx < startX + blockW; bx++) {
                                 const endX = Math.min(bx + 1, image.width);
@@ -1065,8 +1095,10 @@ function quantizeTiles(palettes, image, useDither) {
                     break;
             }
             if (!assigned) {
-                // fallback: single small tile assignment
-                const tile = extractTile(image, startX, startY);
+                // fallback: single small tile assignment (use pre-extracted tile)
+                const mapX = Math.floor(startX / tileWidth);
+                const mapY = Math.floor(startY / tileHeight);
+                const tile = tilesGrid[mapY * tilesX + mapX];
                 let palette = reducedPalettes[0];
                 let closestPaletteIndex = 0;
                 if (tile.colors.length > 0) {
@@ -1109,12 +1141,132 @@ function quantizeTiles(palettes, image, useDither) {
                         }
                     }
                 }
+                // mark this small tile in the tileMap if it had colors
+                const mapX = Math.floor(startX / tileWidth);
+                const mapY = Math.floor(startY / tileHeight);
+                if (tile.colors.length > 0) {
+                    tileMap[mapY * tilesX + mapX] = closestPaletteIndex;
+                }
                 startX += tileWidth;
             }
         }
         // advance Y by one row of tiles (we used variable block heights per X but at least advance by tileHeight)
         startY += tileHeight;
     }
+    // compute connected components of same-palette small tiles
+    function labelComponents(mapArr, tilesX, tilesY) {
+        const comp = new Int32Array(mapArr.length);
+        for (let i = 0; i < comp.length; i++) comp[i] = -1;
+        const compPal = [];
+        let cid = 0;
+        for (let y = 0; y < tilesY; y++) {
+            for (let x = 0; x < tilesX; x++) {
+                const idx = y * tilesX + x;
+                const p = mapArr[idx];
+                if (p < 0 || comp[idx] !== -1) continue;
+                // flood fill
+                const stack = [idx];
+                comp[idx] = cid;
+                while (stack.length > 0) {
+                    const cur = stack.pop();
+                    const cx = cur % tilesX;
+                    const cy = Math.floor(cur / tilesX);
+                    const neighbors = [[cx-1,cy],[cx+1,cy],[cx,cy-1],[cx,cy+1]];
+                    for (const [nx,ny] of neighbors) {
+                        if (nx < 0 || ny < 0 || nx >= tilesX || ny >= tilesY) continue;
+                        const nidx = ny * tilesX + nx;
+                        if (comp[nidx] !== -1) continue;
+                        if (mapArr[nidx] === p) {
+                            comp[nidx] = cid;
+                            stack.push(nidx);
+                        }
+                    }
+                }
+                compPal.push(p);
+                cid++;
+            }
+        }
+        return { comp, compCount: cid, compPal };
+    }
+
+    let labeling = labelComponents(tileMap, tilesX, tilesY);
+    let compCount = labeling.compCount;
+    const maxHw = (quantizationOptions.maxHardwareTiles !== undefined) ? quantizationOptions.maxHardwareTiles : Infinity;
+    if (compCount > maxHw) {
+        // greedy recolor passes to reduce components
+        let improved = true;
+        const maxPasses = tilesX * tilesY;
+        let pass = 0;
+        while (improved && compCount > maxHw && pass < maxPasses) {
+            improved = false;
+            pass++;
+            let bestBenefit = 0;
+            let bestIdx = -1;
+            let bestTargetPal = -1;
+            let bestDelta = Infinity;
+            for (let idx = 0; idx < tileMap.length; idx++) {
+                const curPal = tileMap[idx];
+                const tile = tilesGrid[idx];
+                if (tile == null) continue;
+                const cx = idx % tilesX;
+                const cy = Math.floor(idx / tilesX);
+                const neighPals = new Set();
+                const neighbors = [[cx-1,cy],[cx+1,cy],[cx,cy-1],[cx,cy+1]];
+                for (const [nx,ny] of neighbors) {
+                    if (nx < 0 || ny < 0 || nx >= tilesX || ny >= tilesY) continue;
+                    const nidx = ny * tilesX + nx;
+                    const np = tileMap[nidx];
+                    if (np >= 0 && np !== curPal) neighPals.add(np);
+                }
+                if (neighPals.size === 0) continue;
+                const oldDist = (curPal >= 0) ? paletteDistance(reducedPalettes[curPal], tile) : 0;
+                for (const np of neighPals) {
+                    const newDist = paletteDistance(reducedPalettes[np], tile);
+                    const delta = newDist - oldDist;
+                    if (delta <= tolerance * Math.max(1, tile.pixels.length)) {
+                        // compute how many distinct neighbor components of target palette we'd merge
+                        const seen = new Set();
+                        let numNeighborComps = 0;
+                        for (const [nx,ny] of neighbors) {
+                            if (nx < 0 || ny < 0 || nx >= tilesX || ny >= tilesY) continue;
+                            const nidx = ny * tilesX + nx;
+                            if (tileMap[nidx] === np) {
+                                const cid = labeling.comp[nidx];
+                                if (!seen.has(cid)) { seen.add(cid); numNeighborComps++; }
+                            }
+                        }
+                        if (numNeighborComps <= 0) continue;
+                        if (numNeighborComps > bestBenefit || (numNeighborComps === bestBenefit && delta < bestDelta)) {
+                            bestBenefit = numNeighborComps;
+                            bestIdx = idx;
+                            bestTargetPal = np;
+                            bestDelta = delta;
+                        }
+                    }
+                }
+            }
+            if (bestBenefit > 0 && bestIdx >= 0) {
+                tileMap[bestIdx] = bestTargetPal;
+                labeling = labelComponents(tileMap, tilesX, tilesY);
+                compCount = labeling.compCount;
+                improved = true;
+            }
+            else {
+                break;
+            }
+        }
+    }
+
+    // compute palette usage counts (exclude unassigned / fully transparent small tiles)
+    const paletteUsage = new Array(reducedPalettes.length).fill(0);
+    for (let i = 0; i < tileMap.length; i++) {
+        const p = tileMap[i];
+        if (p >= 0 && p < paletteUsage.length) paletteUsage[p]++;
+    }
+    // attach tileMap, hardware tile count (connected components), and palette usage
+    quantizedImage.tileMap = { tilesX: tilesX, tilesY: tilesY, map: tileMap };
+    quantizedImage.hwTileCount = labeling.compCount;
+    quantizedImage.paletteUsage = paletteUsage;
     return quantizedImage;
     function addBmpColors(palettes, bmpPalette) {
         let i = 0;
