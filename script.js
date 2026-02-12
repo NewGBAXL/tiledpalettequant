@@ -7,11 +7,20 @@ const numPalettesInput = document.getElementById("palette_num");
 const colorsPerPaletteInput = document.getElementById("colors_per_palette");
 const bitsPerChannelInput = document.getElementById("bits_per_channel");
 const fractionOfPixelsInput = document.getElementById("fraction_of_pixels");
+
+// Manual palette placement elements
+const manualPaletteToggle = document.getElementById("manual_palette_toggle");
+const manualPaletteIndexInput = document.getElementById("manual_palette_index");
+const placementCanvas = document.getElementById("placement_canvas");
+let manualPlacementEnabled = false;
+let manualPaletteMap = null; // Int16Array of palette indices, -1 = unset
+let placementTilesX = 0;
+let placementTilesY = 0;
 const integerInputs = [
     [tileWidthInput, 8],
     [tileHeightInput, 8],
     [numPalettesInput, 8],
-    [colorsPerPaletteInput, 4],
+    [colorsPerPaletteInput, 16],
     [bitsPerChannelInput, 5],
 ];
 function validateIntegerInput(numberInput) {
@@ -135,6 +144,130 @@ const quantizeButton = document.getElementById("quantizeButton");
 const quantizedImages = document.getElementById("quantized_images");
 const progress = document.getElementById("progress");
 const radix = 10;
+
+// Setup manual placement interactions
+function ensureManualMap() {
+    const tw = parseInt(tileWidthInput.value, radix);
+    const th = parseInt(tileHeightInput.value, radix);
+    const tilesX = Math.ceil(sourceImage.width / tw);
+    const tilesY = Math.ceil(sourceImage.height / th);
+    if (!manualPaletteMap || placementTilesX !== tilesX || placementTilesY !== tilesY) {
+        manualPaletteMap = new Int16Array(tilesX * tilesY);
+        for (let i = 0; i < manualPaletteMap.length; i++) manualPaletteMap[i] = -1;
+        placementTilesX = tilesX;
+        placementTilesY = tilesY;
+    }
+}
+
+function positionPlacementCanvas() {
+    const rect = sourceImage.getBoundingClientRect();
+    placementCanvas.style.left = (rect.left + window.scrollX) + "px";
+    placementCanvas.style.top = (rect.top + window.scrollY) + "px";
+    placementCanvas.width = sourceImage.width;
+    placementCanvas.height = sourceImage.height;
+    placementCanvas.style.width = sourceImage.width + "px";
+    placementCanvas.style.height = sourceImage.height + "px";
+}
+
+function drawPlacementOverlay() {
+    const ctx = placementCanvas.getContext("2d");
+    ctx.clearRect(0, 0, placementCanvas.width, placementCanvas.height);
+    const tw = parseInt(tileWidthInput.value, radix);
+    const th = parseInt(tileHeightInput.value, radix);
+    // draw filled tiles for assigned palettes
+    if (manualPaletteMap) {
+        for (let ty = 0; ty < placementTilesY; ty++) {
+            for (let tx = 0; tx < placementTilesX; tx++) {
+                const idx = ty * placementTilesX + tx;
+                const p = manualPaletteMap[idx];
+                if (p >= 0) {
+                    const hue = (p * 360 / Math.max(1, parseInt(numPalettesInput.value, radix))) % 360;
+                    ctx.fillStyle = `hsla(${hue},70%,50%,0.28)`;
+                    ctx.fillRect(tx * tw, ty * th, tw, th);
+                }
+            }
+        }
+    }
+    // draw grid
+    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    ctx.lineWidth = 1;
+    const tilesX = placementTilesX;
+    const tilesY = placementTilesY;
+    for (let x = 0; x <= tilesX; x++) {
+        ctx.beginPath();
+        ctx.moveTo(x * tw + 0.5, 0);
+        ctx.lineTo(x * tw + 0.5, placementCanvas.height);
+        ctx.stroke();
+    }
+    for (let y = 0; y <= tilesY; y++) {
+        ctx.beginPath();
+        ctx.moveTo(0, y * th + 0.5);
+        ctx.lineTo(placementCanvas.width, y * th + 0.5);
+        ctx.stroke();
+    }
+}
+
+function enableManualPlacement(enabled) {
+    manualPlacementEnabled = enabled;
+    if (enabled) {
+        ensureManualMap();
+        positionPlacementCanvas();
+        placementCanvas.style.display = "block";
+        drawPlacementOverlay();
+    }
+    else {
+        placementCanvas.style.display = "none";
+    }
+}
+
+placementCanvas.addEventListener("click", (ev) => {
+    if (!manualPlacementEnabled)
+        return;
+    const rect = placementCanvas.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    const y = ev.clientY - rect.top;
+    const tw = parseInt(tileWidthInput.value, radix);
+    const th = parseInt(tileHeightInput.value, radix);
+    const tx = Math.floor(x / tw);
+    const ty = Math.floor(y / th);
+    if (tx < 0 || ty < 0 || tx >= placementTilesX || ty >= placementTilesY)
+        return;
+    const idx = ty * placementTilesX + tx;
+    let paletteIndex = parseInt(manualPaletteIndexInput.value, radix);
+    const maxP = Math.max(0, parseInt(numPalettesInput.value, radix) - 1);
+    if (isNaN(paletteIndex) || paletteIndex < 0) paletteIndex = 0;
+    if (paletteIndex > maxP) paletteIndex = maxP;
+    manualPaletteMap[idx] = paletteIndex;
+    drawPlacementOverlay();
+});
+
+// react to toggles and inputs
+manualPaletteToggle.addEventListener("change", () => {
+    enableManualPlacement(manualPaletteToggle.checked);
+});
+manualPaletteIndexInput.addEventListener("change", () => {
+    let v = parseInt(manualPaletteIndexInput.value, radix);
+    if (isNaN(v) || v < 0) v = 0;
+    const maxP = Math.max(0, parseInt(numPalettesInput.value, radix) - 1);
+    if (v > maxP) v = maxP;
+    manualPaletteIndexInput.value = v.toString();
+});
+window.addEventListener("resize", () => {
+    if (manualPlacementEnabled) {
+        positionPlacementCanvas();
+        drawPlacementOverlay();
+    }
+});
+sourceImage.addEventListener("load", () => {
+    if (manualPlacementEnabled) {
+        ensureManualMap();
+        positionPlacementCanvas();
+        drawPlacementOverlay();
+    }
+});
+tileWidthInput.addEventListener("change", () => { if (manualPlacementEnabled) { ensureManualMap(); drawPlacementOverlay(); } });
+tileHeightInput.addEventListener("change", () => { if (manualPlacementEnabled) { ensureManualMap(); positionPlacementCanvas(); drawPlacementOverlay(); } });
+numPalettesInput.addEventListener("change", () => { if (manualPlacementEnabled) drawPlacementOverlay(); });
 quantizeButton.addEventListener("click", () => {
     sourceImage = document.getElementById("source_img");
     if (!inProgress) {
@@ -227,7 +360,7 @@ quantizeButton.addEventListener("click", () => {
             palettesImageDownload.href = palettesImage.toDataURL();
         }
     };
-    worker.postMessage({
+    const msg = {
         action: Action.StartQuantization,
         imageData: imageDataFrom(sourceImage),
         quantizationOptions: {
@@ -243,7 +376,20 @@ quantizeButton.addEventListener("click", () => {
             ditherWeight: parseFloat(ditherWeightInput.value),
             ditherPattern: ditherPattern,
         },
-    });
+    };
+    // include manual palette map if user enabled manual placement
+    if (manualPlacementEnabled && manualPaletteMap) {
+        msg.quantizationOptions.manualPaletteMap = {
+            tilesX: placementTilesX,
+            tilesY: placementTilesY,
+            map: manualPaletteMap,
+        };
+        // transfer the underlying buffer for efficiency
+        worker.postMessage(msg, [manualPaletteMap.buffer]);
+    }
+    else {
+        worker.postMessage(msg);
+    }
 });
 function hexToColor(colorStr) {
     return [

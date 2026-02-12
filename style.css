@@ -10,3 +10,14 @@ body {
   background-color: rgb(144, 144, 144);
   padding-bottom: 100vh;
 }
+
+/* hide advanced option rows marked with .hidden-option */
+.hidden-option {
+  display: none;
+}
+
+/* placement canvas sits over the source image for manual palette placement */
+#placement_canvas {
+  image-rendering: pixelated;
+  z-index: 5;
+}
